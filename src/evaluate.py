@@ -1,14 +1,13 @@
 import json
 from pathlib import Path
 
+import argparse
+
 import torch
 from sentence_transformers import SentenceTransformer
 from transformers import pipeline
 
 
-PREDICTION_FILE = Path(
-    "outputs/sft_predictions.jsonl"
-)
 
 SEMANTIC_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 TOXICITY_MODEL = "unitary/toxic-bert"
@@ -23,15 +22,40 @@ def get_device():
         return "mps"
     return "cpu"
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--predictions",
+        type=Path,
+        required=True,
+        help="Path to prediction JSONL file",
+    )
+
+    parser.add_argument(
+        "--name",
+        type=str,
+        required=True,
+        help="Name shown in evaluation output",
+    )
+
+    return parser.parse_args()
 
 def main():
+    args = parse_args()
     device = get_device()
+
+    prediction_file = args.predictions
+    experiment_name = args.name
 
     # --------------------------------------------------
     # Load predictions
     # --------------------------------------------------
 
-    with PREDICTION_FILE.open("r", encoding="utf-8") as f:
+    with prediction_file.open(
+        "r",
+        encoding="utf-8",
+    ) as f:
         examples = [json.loads(line) for line in f]
 
     inputs = [x["input"] for x in examples]
@@ -164,7 +188,7 @@ def main():
     )
 
     print("=" * 60)
-    print("ZERO-SHOT EVALUATION")
+    print(f"{experiment_name} EVALUATION")
     print("=" * 60)
 
     print(f"Examples:                {len(examples)}")
