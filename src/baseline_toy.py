@@ -5,43 +5,16 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_NAME = "models/Qwen2.5-0.5B-Instruct"
 
-INPUT_FILE = Path("data/processed/test.jsonl")
-OUTPUT_FILE = Path("outputs/zero_shot_predictions.jsonl")
-
-MAX_EXAMPLES = None
+INPUT_FILE = Path("data/toy.jsonl")
+OUTPUT_FILE = Path("outputs/toy_predictions.jsonl")
 
 
 def get_device():
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif torch.backends.mps.is_available():
+    if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
-
-
-def load_unique_inputs(path, max_examples=None):
-    """Load one example per unique toxic source."""
-    examples = []
-    seen = set()
-
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            example = json.loads(line)
-
-            source = example["input"]
-
-            if source in seen:
-                continue
-
-            seen.add(source)
-            examples.append(example)
-
-            if max_examples is not None and len(examples) >= max_examples:
-                break
-
-    return examples
 
 
 def main():
@@ -54,7 +27,7 @@ def main():
 
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
-        dtype=torch.float16,
+        torch_dtype=torch.float16,
     )
 
     model = model.to(device)
@@ -62,35 +35,34 @@ def main():
 
     print("Model loaded successfully.")
 
-    examples = load_unique_inputs(
-        INPUT_FILE,
-        max_examples=MAX_EXAMPLES,
-    )
-
-    print(f"Evaluating {len(examples)} unique test inputs.")
-
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    examples = []
+
+    with INPUT_FILE.open("r", encoding="utf-8") as f:
+        for line in f:
+            examples.append(json.loads(line))
 
     results = []
 
     for i, example in enumerate(examples):
         sentence = example["input"]
+        target_style = example["target_style"]
 
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "You are a text rewriting assistant. "
-                    "Your task is to remove toxic, rude, or offensive language "
-                    "while preserving the original meaning as much as possible."
+                    "You are a writing assistant. "
+                    "Rewrite text in the requested style while preserving "
+                    "its original meaning."
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    "Rewrite the following sentence in a neutral and non-toxic "
-                    "style. Preserve the original meaning and output only the "
-                    "rewritten sentence.\n\n"
+                    f"Rewrite the following sentence in a {target_style} style. "
+                    f"Preserve the original meaning and output only the rewritten sentence.\n\n"
                     f"Sentence: {sentence}"
                 ),
             },
@@ -114,6 +86,7 @@ def main():
                 do_sample=False,
             )
 
+        # Remove the original prompt tokens.
         output_ids = generated_ids[0][inputs["input_ids"].shape[1]:]
 
         prediction = tokenizer.decode(
@@ -123,6 +96,7 @@ def main():
 
         result = {
             "input": sentence,
+            "target_style": target_style,
             "prediction": prediction,
         }
 
@@ -136,8 +110,7 @@ def main():
         for result in results:
             f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
-    print()
-    print(f"Done! Results saved to: {OUTPUT_FILE}")
+    print(f"\nDone! Results saved to: {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
