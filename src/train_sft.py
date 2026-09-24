@@ -619,6 +619,13 @@ def main():
         running_loss = 0.0
         accumulated_batches = 0
 
+        # Handle the final incomplete gradient accumulation group.
+        num_batches = len(train_dataloader)
+        remainder = (
+            num_batches
+            % GRADIENT_ACCUMULATION_STEPS
+        )
+
         for batch_idx, batch in enumerate(
             train_dataloader
         ):
@@ -635,9 +642,20 @@ def main():
 
             epoch_loss += loss.item()
 
+            is_final_group = (
+                remainder != 0
+                and batch_idx >= num_batches - remainder
+            )
+
+            current_accumulation_steps = (
+                remainder
+                if is_final_group
+                else GRADIENT_ACCUMULATION_STEPS
+            )
+
             scaled_loss = (
                 loss
-                / GRADIENT_ACCUMULATION_STEPS
+                / current_accumulation_steps
             )
 
             # ------------------------------------------
