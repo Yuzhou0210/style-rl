@@ -200,6 +200,18 @@ def main():
     # --------------------------------------------------
     # Reward function
     # --------------------------------------------------
+# Style-only reward:
+#
+#   R = neutral_logit - toxic_logit
+#
+# This is equivalent to the log-odds:
+#
+#   log P(neutral) - log P(toxic)
+#
+# We use the logit margin instead of
+# 1 - P(toxic) to avoid reward saturation
+# when the toxicity classifier assigns
+# near-zero toxicity probability.
 
     def style_reward(
         completions,
@@ -227,14 +239,13 @@ def main():
                 **encoded
             ).logits
 
-            probabilities = torch.softmax(
-                logits,
-                dim=-1,
+            neutral_logits = logits[:, 0]
+            toxic_logits = logits[:, 1]
+
+            rewards = (
+                neutral_logits
+                - toxic_logits
             )
-
-            toxicity = probabilities[:, 1]
-
-            rewards = 1.0 - toxicity
 
         return rewards.float().cpu().tolist()
 
