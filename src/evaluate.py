@@ -6,7 +6,9 @@ from sentence_transformers import SentenceTransformer
 from transformers import pipeline
 
 
-PREDICTION_FILE = Path("outputs/zero_shot_predictions.jsonl")
+PREDICTION_FILE = Path(
+    "outputs/sft_predictions.jsonl"
+)
 
 SEMANTIC_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 TOXICITY_MODEL = "unitary/toxic-bert"
