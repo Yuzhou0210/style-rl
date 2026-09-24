@@ -1,12 +1,18 @@
+import argparse
 import json
 import math
 import random
+import time
 from pathlib import Path
 
 import torch
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    get_cosine_schedule_with_warmup,
+)
 
 
 # ==================================================
@@ -18,44 +24,86 @@ MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 TRAIN_FILE = Path("data/processed/train.jsonl")
 VALID_FILE = Path("data/processed/valid.jsonl")
 
-OUTPUT_DIR = Path(
-    "models/qwen2.5-0.5b-paradetox-lora-smoke"
-)
-
-BEST_MODEL_DIR = OUTPUT_DIR / "best"
-
-# Smoke-test settings
-NUM_EXAMPLES = 100
-NUM_VALID_EXAMPLES = 100
-
-NUM_EPOCHS = 1
+SEED = 42
 
 BATCH_SIZE = 1
 GRADIENT_ACCUMULATION_STEPS = 4
 
 LEARNING_RATE = 2e-4
+WARMUP_RATIO = 0.03
+
 MAX_LENGTH = 256
 
-SEED = 42
-
-# LoRA settings
 LORA_R = 8
 LORA_ALPHA = 16
 LORA_DROPOUT = 0.05
 
 
 # ==================================================
-# Device
+# Arguments
+# ==================================================
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--mode",
+        choices=["debug", "full"],
+        default="debug",
+    )
+
+    return parser.parse_args()
+
+
+# ==================================================
+# Device / precision
 # ==================================================
 
 def get_device():
     if torch.cuda.is_available():
         return torch.device("cuda")
 
-    elif torch.backends.mps.is_available():
+    if torch.backends.mps.is_available():
         return torch.device("mps")
 
     return torch.device("cpu")
+
+
+def get_precision(device):
+    """
+    Returns:
+        model_dtype
+        use_amp
+        amp_dtype
+        use_grad_scaler
+    """
+
+    if device.type == "cuda":
+
+        # Ampere or newer generally supports BF16 well.
+        if torch.cuda.is_bf16_supported():
+            return (
+                torch.bfloat16,
+                True,
+                torch.bfloat16,
+                False,
+            )
+
+        # Older CUDA GPUs: use FP16 + GradScaler.
+        return (
+            torch.float16,
+            True,
+            torch.float16,
+            True,
+        )
+
+    # For MPS/CPU debugging prioritize stability.
+    return (
+        torch.float32,
+        False,
+        None,
+        False,
+    )
 
 
 # ==================================================
@@ -82,10 +130,6 @@ class DetoxDataset(Dataset):
         source = example["input"]
         target = example["target"]
 
-        # --------------------------------------------------
-        # Prompt: system + user
-        # --------------------------------------------------
-
         prompt_messages = [
             {
                 "role": "system",
@@ -108,23 +152,11 @@ class DetoxDataset(Dataset):
             },
         ]
 
-        # --------------------------------------------------
-        # Prompt text
-        #
-        # add_generation_prompt=True adds the assistant
-        # generation marker. Everything up to this point
-        # will be masked from the training loss.
-        # --------------------------------------------------
-
         prompt_text = self.tokenizer.apply_chat_template(
             prompt_messages,
             tokenize=False,
             add_generation_prompt=True,
         )
-
-        # --------------------------------------------------
-        # Full conversation: prompt + target
-        # --------------------------------------------------
 
         full_messages = prompt_messages + [
             {
@@ -139,20 +171,12 @@ class DetoxDataset(Dataset):
             add_generation_prompt=False,
         )
 
-        # --------------------------------------------------
-        # Tokenize prompt
-        # --------------------------------------------------
-
         prompt_ids = self.tokenizer(
             prompt_text,
             add_special_tokens=False,
             truncation=True,
             max_length=MAX_LENGTH,
         )["input_ids"]
-
-        # --------------------------------------------------
-        # Tokenize full conversation
-        # --------------------------------------------------
 
         encoded = self.tokenizer(
             full_text,
@@ -171,10 +195,6 @@ class DetoxDataset(Dataset):
             "attention_mask"
         ].squeeze(0)
 
-        # --------------------------------------------------
-        # Assistant-only labels
-        # --------------------------------------------------
-
         labels = input_ids.clone()
 
         prompt_length = min(
@@ -182,8 +202,7 @@ class DetoxDataset(Dataset):
             MAX_LENGTH,
         )
 
-        # Ignore:
-        # system + user + assistant generation marker
+        # Assistant-only loss
         labels[:prompt_length] = -100
 
         # Ignore padding
@@ -200,10 +219,7 @@ class DetoxDataset(Dataset):
 # Load examples
 # ==================================================
 
-def load_examples(
-    path,
-    limit=None,
-):
+def load_examples(path, limit=None):
 
     examples = []
 
@@ -228,6 +244,37 @@ def load_examples(
 
 
 # ==================================================
+# Forward helper
+# ==================================================
+
+def forward_model(
+    model,
+    batch,
+    device,
+    use_amp,
+    amp_dtype,
+):
+
+    batch = {
+        key: value.to(device)
+        for key, value in batch.items()
+    }
+
+    if use_amp:
+
+        with torch.autocast(
+            device_type="cuda",
+            dtype=amp_dtype,
+        ):
+            outputs = model(**batch)
+
+    else:
+        outputs = model(**batch)
+
+    return outputs
+
+
+# ==================================================
 # Validation
 # ==================================================
 
@@ -235,6 +282,8 @@ def evaluate_validation_loss(
     model,
     dataloader,
     device,
+    use_amp,
+    amp_dtype,
 ):
 
     model.eval()
@@ -246,24 +295,24 @@ def evaluate_validation_loss(
 
         for batch in dataloader:
 
-            batch = {
-                key: value.to(device)
-                for key, value
-                in batch.items()
-            }
+            outputs = forward_model(
+                model,
+                batch,
+                device,
+                use_amp,
+                amp_dtype,
+            )
 
-            outputs = model(**batch)
+            total_loss += (
+                outputs.loss.item()
+            )
 
-            loss = outputs.loss
-
-            total_loss += loss.item()
             num_batches += 1
 
     average_loss = (
         total_loss / num_batches
     )
 
-    # Switch back to training mode
     model.train()
 
     return average_loss
@@ -275,28 +324,87 @@ def evaluate_validation_loss(
 
 def main():
 
-    # --------------------------------------------------
-    # Reproducibility
-    # --------------------------------------------------
+    args = parse_args()
+
+    start_time = time.perf_counter()
 
     random.seed(SEED)
     torch.manual_seed(SEED)
 
-    # --------------------------------------------------
-    # Device
-    # --------------------------------------------------
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
 
     device = get_device()
 
-    print(f"Using device: {device}")
-    print(f"Random seed: {SEED}")
+    # --------------------------------------------------
+    # Mode
+    # --------------------------------------------------
+
+    if args.mode == "debug":
+
+        num_train_examples = 100
+        num_valid_examples = 100
+        num_epochs = 1
+
+        output_dir = Path(
+            "models/"
+            "qwen2.5-0.5b-paradetox-lora-debug"
+        )
+
+    else:
+
+        num_train_examples = None
+        num_valid_examples = None
+        num_epochs = 3
+
+        output_dir = Path(
+            "models/"
+            "qwen2.5-0.5b-paradetox-lora-full"
+        )
+
+    best_model_dir = (
+        output_dir / "best"
+    )
 
     # --------------------------------------------------
-    # Load tokenizer
+    # Precision
+    # --------------------------------------------------
+
+    (
+        model_dtype,
+        use_amp,
+        amp_dtype,
+        use_grad_scaler,
+    ) = get_precision(device)
+
+    print("=" * 60)
+    print("SFT CONFIGURATION")
+    print("=" * 60)
+
+    print(f"Mode:              {args.mode}")
+    print(f"Device:            {device}")
+    print(f"Model dtype:       {model_dtype}")
+    print(f"Mixed precision:   {use_amp}")
+    print(f"Seed:              {SEED}")
+    print(f"Epochs:            {num_epochs}")
+    print(f"Learning rate:     {LEARNING_RATE}")
+    print(f"Warmup ratio:      {WARMUP_RATIO}")
+    print(f"Max length:        {MAX_LENGTH}")
+
+    if device.type == "cuda":
+        print(
+            "GPU:               "
+            f"{torch.cuda.get_device_name(0)}"
+        )
+
+    print("=" * 60)
+
+    # --------------------------------------------------
+    # Tokenizer
     # --------------------------------------------------
 
     print(
-        f"Loading model: {MODEL_NAME}"
+        f"\nLoading model: {MODEL_NAME}"
     )
 
     tokenizer = (
@@ -311,21 +419,18 @@ def main():
         )
 
     # --------------------------------------------------
-    # Load base model
-    #
-    # float32 is intentionally used for the first
-    # MPS training tests for stability.
+    # Base model
     # --------------------------------------------------
 
     model = (
         AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
-            dtype=torch.float32,
+            dtype=model_dtype,
         )
     )
 
     # --------------------------------------------------
-    # LoRA configuration
+    # LoRA
     # --------------------------------------------------
 
     lora_config = LoraConfig(
@@ -355,13 +460,18 @@ def main():
     model.print_trainable_parameters()
     print()
 
-    # ==================================================
-    # Training data
-    # ==================================================
+    # --------------------------------------------------
+    # Data
+    # --------------------------------------------------
 
     train_examples = load_examples(
         TRAIN_FILE,
-        NUM_EXAMPLES,
+        num_train_examples,
+    )
+
+    valid_examples = load_examples(
+        VALID_FILE,
+        num_valid_examples,
     )
 
     print(
@@ -369,34 +479,31 @@ def main():
         f"{len(train_examples)}"
     )
 
-    train_dataset = DetoxDataset(
-        train_examples,
-        tokenizer,
-    )
-
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-    )
-
-    # ==================================================
-    # Validation data
-    # ==================================================
-
-    valid_examples = load_examples(
-        VALID_FILE,
-        NUM_VALID_EXAMPLES,
-    )
-
     print(
         f"Validation examples: "
         f"{len(valid_examples)}"
     )
 
+    train_dataset = DetoxDataset(
+        train_examples,
+        tokenizer,
+    )
+
     valid_dataset = DetoxDataset(
         valid_examples,
         tokenizer,
+    )
+
+    # Explicit generator makes training shuffle
+    # reproducible.
+    generator = torch.Generator()
+    generator.manual_seed(SEED)
+
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        generator=generator,
     )
 
     valid_dataloader = DataLoader(
@@ -405,22 +512,24 @@ def main():
         shuffle=False,
     )
 
-    # ==================================================
+    # --------------------------------------------------
     # Optimizer
-    # ==================================================
+    # --------------------------------------------------
+
+    trainable_parameters = [
+        p
+        for p in model.parameters()
+        if p.requires_grad
+    ]
 
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        trainable_parameters,
         lr=LEARNING_RATE,
     )
 
-    optimizer.zero_grad()
-
-    # ==================================================
-    # Training setup
-    # ==================================================
-
-    model.train()
+    # --------------------------------------------------
+    # Number of optimizer steps
+    # --------------------------------------------------
 
     optimizer_steps_per_epoch = (
         math.ceil(
@@ -431,41 +540,82 @@ def main():
 
     total_optimizer_steps = (
         optimizer_steps_per_epoch
-        * NUM_EPOCHS
+        * num_epochs
     )
+
+    warmup_steps = int(
+        total_optimizer_steps
+        * WARMUP_RATIO
+    )
+
+    # --------------------------------------------------
+    # Cosine scheduler
+    # --------------------------------------------------
+
+    scheduler = (
+        get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=(
+                total_optimizer_steps
+            ),
+        )
+    )
+
+    # --------------------------------------------------
+    # GradScaler
+    #
+    # BF16 does not need scaling.
+    # FP16 does.
+    # --------------------------------------------------
+
+    scaler = None
+
+    if use_grad_scaler:
+        scaler = torch.amp.GradScaler(
+            "cuda"
+        )
+
+    print()
+    print(
+        f"Optimizer steps / epoch: "
+        f"{optimizer_steps_per_epoch}"
+    )
+
+    print(
+        f"Total optimizer steps: "
+        f"{total_optimizer_steps}"
+    )
+
+    print(
+        f"Warmup steps: "
+        f"{warmup_steps}"
+    )
+
+    print()
+
+    # --------------------------------------------------
+    # Training
+    # --------------------------------------------------
+
+    optimizer.zero_grad()
+
+    model.train()
 
     optimizer_step = 0
 
     best_valid_loss = float("inf")
 
-    print()
-    print(
-        "Starting LoRA smoke-test training..."
-    )
+    for epoch in range(num_epochs):
 
-    print(
-        f"Epochs: {NUM_EPOCHS}"
-    )
-
-    print(
-        "Optimizer steps per epoch: "
-        f"{optimizer_steps_per_epoch}"
-    )
-
-    print(
-        "Total optimizer steps: "
-        f"{total_optimizer_steps}"
-    )
-
-    print()
-
-    # ==================================================
-    # Training loop
-    # ==================================================
-
-    for epoch in range(NUM_EPOCHS):
+        print("=" * 60)
+        print(
+            f"Epoch {epoch + 1}/{num_epochs}"
+        )
+        print("=" * 60)
 
         epoch_loss = 0.0
+
         running_loss = 0.0
         accumulated_batches = 0
 
@@ -473,43 +623,39 @@ def main():
             train_dataloader
         ):
 
-            # ------------------------------------------
-            # Move batch to device
-            # ------------------------------------------
-
-            batch = {
-                key: value.to(device)
-                for key, value
-                in batch.items()
-            }
-
-            # ------------------------------------------
-            # Forward
-            # ------------------------------------------
-
-            outputs = model(**batch)
+            outputs = forward_model(
+                model,
+                batch,
+                device,
+                use_amp,
+                amp_dtype,
+            )
 
             loss = outputs.loss
 
             epoch_loss += loss.item()
-
-            # ------------------------------------------
-            # Gradient accumulation
-            # ------------------------------------------
 
             scaled_loss = (
                 loss
                 / GRADIENT_ACCUMULATION_STEPS
             )
 
-            scaled_loss.backward()
+            # ------------------------------------------
+            # Backward
+            # ------------------------------------------
+
+            if scaler is not None:
+
+                scaler.scale(
+                    scaled_loss
+                ).backward()
+
+            else:
+
+                scaled_loss.backward()
 
             running_loss += loss.item()
             accumulated_batches += 1
-
-            # ------------------------------------------
-            # Decide whether to update parameters
-            # ------------------------------------------
 
             should_step = (
                 (batch_idx + 1)
@@ -524,46 +670,64 @@ def main():
 
             if should_step or is_last_batch:
 
-                optimizer.step()
+                # --------------------------------------
+                # Optimizer step
+                # --------------------------------------
+
+                if scaler is not None:
+
+                    scaler.step(optimizer)
+                    scaler.update()
+
+                else:
+
+                    optimizer.step()
+
+                scheduler.step()
+
                 optimizer.zero_grad()
 
                 optimizer_step += 1
 
-                # Use the actual number of accumulated
-                # batches. This also handles a final
-                # incomplete accumulation group.
                 avg_loss = (
                     running_loss
                     / accumulated_batches
                 )
 
-                print(
-                    f"Epoch {epoch + 1} | "
-                    f"Step {optimizer_step}/"
-                    f"{total_optimizer_steps} | "
-                    f"Loss: {avg_loss:.4f}"
+                current_lr = (
+                    scheduler.get_last_lr()[0]
                 )
+
+                # Avoid printing thousands of lines.
+                if (
+                    optimizer_step % 100 == 0
+                    or optimizer_step == 1
+                    or is_last_batch
+                ):
+                    print(
+                        f"Step "
+                        f"{optimizer_step}/"
+                        f"{total_optimizer_steps} | "
+                        f"Loss: "
+                        f"{avg_loss:.4f} | "
+                        f"LR: "
+                        f"{current_lr:.2e}"
+                    )
 
                 running_loss = 0.0
                 accumulated_batches = 0
 
-        # ==================================================
-        # End-of-epoch training loss
-        # ==================================================
+        # --------------------------------------------------
+        # Validation
+        # --------------------------------------------------
 
         train_loss = (
             epoch_loss
             / len(train_dataloader)
         )
 
-        # ==================================================
-        # Validation
-        # ==================================================
-
-        print()
         print(
-            f"Running validation after "
-            f"epoch {epoch + 1}..."
+            "\nRunning validation..."
         )
 
         valid_loss = (
@@ -571,35 +735,38 @@ def main():
                 model,
                 valid_dataloader,
                 device,
+                use_amp,
+                amp_dtype,
             )
         )
 
-        print()
         print(
-            f"Epoch {epoch + 1} complete | "
-            f"Train Loss: {train_loss:.4f} | "
-            f"Validation Loss: {valid_loss:.4f}"
+            f"\nEpoch {epoch + 1} complete | "
+            f"Train Loss: "
+            f"{train_loss:.4f} | "
+            f"Validation Loss: "
+            f"{valid_loss:.4f}"
         )
 
-        # ==================================================
-        # Save best validation checkpoint
-        # ==================================================
+        # --------------------------------------------------
+        # Best checkpoint
+        # --------------------------------------------------
 
         if valid_loss < best_valid_loss:
 
             best_valid_loss = valid_loss
 
-            BEST_MODEL_DIR.mkdir(
+            best_model_dir.mkdir(
                 parents=True,
                 exist_ok=True,
             )
 
             model.save_pretrained(
-                BEST_MODEL_DIR
+                best_model_dir
             )
 
             tokenizer.save_pretrained(
-                BEST_MODEL_DIR
+                best_model_dir
             )
 
             print(
@@ -608,15 +775,32 @@ def main():
             )
 
             print(
-                "Best LoRA adapter saved to: "
-                f"{BEST_MODEL_DIR}"
+                "Best adapter saved to: "
+                f"{best_model_dir}"
             )
 
         print()
 
-    # ==================================================
-    # Finished
-    # ==================================================
+    # --------------------------------------------------
+    # Runtime
+    # --------------------------------------------------
+
+    elapsed = (
+        time.perf_counter()
+        - start_time
+    )
+
+    hours = int(
+        elapsed // 3600
+    )
+
+    minutes = int(
+        (elapsed % 3600) // 60
+    )
+
+    seconds = (
+        elapsed % 60
+    )
 
     print("=" * 60)
     print("Training complete.")
@@ -625,15 +809,17 @@ def main():
         f"{best_valid_loss:.4f}"
     )
     print(
-        f"Best LoRA adapter: "
-        f"{BEST_MODEL_DIR}"
+        f"Best adapter: "
+        f"{best_model_dir}"
+    )
+    print(
+        f"Total runtime: "
+        f"{hours}h "
+        f"{minutes}m "
+        f"{seconds:.1f}s"
     )
     print("=" * 60)
 
-
-# ==================================================
-# Entry point
-# ==================================================
 
 if __name__ == "__main__":
     main()
