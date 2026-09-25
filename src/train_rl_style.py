@@ -362,7 +362,10 @@ def main():
 
     print("\nStarting GRPO training...")
 
-    trainer.train()
+    if args.mode == "full":
+        trainer.train(resume_from_checkpoint=True)
+    else:
+        trainer.train()
 
     # --------------------------------------------------
     # Save final adapter
