@@ -291,7 +291,7 @@ def main():
             "qwen2.5-0.5b-paradetox-rl-style-debug"
         )
 
-        max_steps = 100
+        max_steps = 10
 
     else:
         output_dir = (
@@ -398,3 +398,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
