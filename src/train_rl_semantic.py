@@ -336,9 +336,13 @@ def main():
             neutral_logits = logits[:, 0]
             toxic_logits = logits[:, 1]
 
-            rewards = (
+            logit_margin = (
                 neutral_logits
                 - toxic_logits
+            )
+
+            rewards = torch.tanh(
+                logit_margin / 5.0
             )
 
         return (
