@@ -291,7 +291,7 @@ def main():
             "qwen2.5-0.5b-paradetox-rl-style-debug"
         )
 
-        max_steps = 10
+        max_steps = 100
 
     else:
         output_dir = (
@@ -329,7 +329,7 @@ def main():
 
         beta=0.0,
 
-        logging_steps=1,
+        logging_steps=10,
         logging_first_step=True,
 
         save_strategy="steps",
