@@ -1,0 +1,29 @@
+Final Test Results
+==================
+
+Dataset: ParaDetox
+Test examples: 1194
+
+Zero-shot
+Semantic similarity: 0.7268
+Input toxicity: 0.8958
+Output toxicity: 0.3980
+Detox success rate: 0.5879
+
+SFT-LoRA
+Semantic similarity: 0.7983
+Input toxicity: 0.8958
+Output toxicity: 0.0685
+Detox success rate: 0.9514
+
+RL Style-only
+Semantic similarity: 0.4153
+Input toxicity: 0.8958
+Output toxicity: 0.0033
+Detox success rate: 1.0000
+
+RL Style+Semantic
+Semantic similarity: 0.8657
+Input toxicity: 0.8958
+Output toxicity: 0.0774
+Detox success rate: 0.9430
