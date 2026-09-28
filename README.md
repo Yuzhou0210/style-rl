@@ -55,7 +55,7 @@ style-rl/
 │   └── rl_semantic_scored.jsonl
 │
 └── report/
-    └── main.pdf
+    └── report.pdf
 ```
 
 Model checkpoints are not included in the repository because of their size.
