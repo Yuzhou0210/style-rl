@@ -1,0 +1,19 @@
+# Core deep learning framework
+torch==2.8.0
+
+# Hugging Face ecosystem
+transformers==5.16.1
+datasets
+peft==0.20.0
+trl==1.13.0
+
+# Sentence embedding models used for semantic rewards and evaluation
+sentence-transformers
+
+# Evaluation and statistical analysis
+scikit-learn
+scipy
+numpy
+
+# Utilities
+tqdm
