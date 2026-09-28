@@ -37,15 +37,22 @@ style-rl/
 ├── requirements.txt
 ├── .gitignore
 │
-├── prepare_data.py
-├── baseline.py
-├── train_sft.py
-├── generate_sft.py
-├── train_rl_style.py
-├── generate_rl_style.py
-├── train_rl_semantic.py
-├── generate_rl_semantic.py
-├── evaluate.py
+├── src/
+│   ├── prepare_data.py
+│   ├── baseline.py
+│   ├── baseline_toy.py
+│   ├── check_truncation.py
+│   ├── train_sft.py
+│   ├── generate_sft.py
+│   ├── generate_sft_validation.py
+│   ├── train_rl_style.py
+│   ├── generate_rl_style.py
+│   ├── train_rl_semantic.py
+│   ├── generate_rl_semantic.py
+│   ├── generate_rl_validation.py
+│   ├── test_style_reward.py
+│   ├── evaluate_all_predictions.py
+│   └── evaluate.py
 │
 ├── results/
 │   ├── aggregate_results.json
