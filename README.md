@@ -311,17 +311,30 @@ Generate predictions using the trained SFT adapter:
 python generate_sft.py
 ```
 
+Validation-set predictions can be generated with:
+
+```bash
+python generate_sft_validation.py
+```
+
 ---
 
 ### 3. Style-only GRPO
 
-Train the style-only GRPO model:
+The toxicity-based style reward can be tested independently before
+full GRPO training with:
+
+```bash
+python test_style_reward.py
+```
+
+Train the Style-only GRPO model:
 
 ```bash
 python train_rl_style.py
 ```
 
-Generate predictions:
+Generate final test-set predictions:
 
 ```bash
 python generate_rl_style.py
@@ -331,19 +344,23 @@ python generate_rl_style.py
 
 ### 4. Style+Semantic GRPO
 
-Train the combined-reward GRPO model:
+Train the Style+Semantic GRPO model:
 
 ```bash
 python train_rl_semantic.py
 ```
 
-Generate predictions:
+Validation-set predictions can be generated with:
+
+```bash
+python generate_rl_validation.py
+```
+
+Generate final test-set predictions:
 
 ```bash
 python generate_rl_semantic.py
 ```
-
-Both GRPO experiments start independently from the same SFT checkpoint.
 
 ---
 
@@ -393,6 +410,10 @@ Evaluate all four ParaDetox systems with the frozen final evaluators:
 ```bash
 evaluate_all_predictions.py
 ```
+
+The latter produces the scored prediction files and aggregate results
+reported in this repository.
+
 
 ---
 
