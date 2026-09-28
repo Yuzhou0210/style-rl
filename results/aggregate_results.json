@@ -1,0 +1,26 @@
+{
+  "Zero-shot": {
+    "n": 1194,
+    "semantic_similarity": 0.7268044063985235,
+    "toxicity_score": 0.39789150173203913,
+    "detox_success": 0.5887772194304858
+  },
+  "SFT-LoRA": {
+    "n": 1194,
+    "semantic_similarity": 0.7982991334593775,
+    "toxicity_score": 0.06852570771134593,
+    "detox_success": 0.9514237855946399
+  },
+  "Style-only GRPO": {
+    "n": 1194,
+    "semantic_similarity": 0.4152929957806315,
+    "toxicity_score": 0.0033457406216485883,
+    "detox_success": 1.0
+  },
+  "Style+Semantic GRPO": {
+    "n": 1194,
+    "semantic_similarity": 0.8657432330188839,
+    "toxicity_score": 0.0774236583255541,
+    "detox_success": 0.9430485762144054
+  }
+}
