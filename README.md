@@ -388,6 +388,11 @@ Run the evaluation script with:
 ```bash
 python evaluate.py
 ```
+Evaluate all four ParaDetox systems with the frozen final evaluators:
+
+```bash
+evaluate_all_predictions.py
+```
 
 ---
 
